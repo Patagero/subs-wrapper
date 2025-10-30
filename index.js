@@ -7,7 +7,20 @@ const app = express();
 const PORT = process.env.PORT || 7000;
 const ORIGINAL = "https://2ecbbd610840-podnapisi.baby-beamup.club";
 
-// ----- MANIFEST -----
+// --- CORS: dovoli vse ---
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+// --- Health / root (za hitri test & Render health check) ---
+app.get("/", (req, res) => res.send("OK - subs-wrapper"));
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// --- Manifest ---
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "subs-wrapper",
@@ -18,21 +31,24 @@ app.get("/manifest.json", (req, res) => {
     types: ["movie", "series"],
     idPrefixes: ["tt"],
     catalogs: [],
+    behaviorHints: { configurable: false, configurationRequired: false }
   });
 });
 
-// ----- SRT PROXY -----
+// --- /srt: ZIP/.srt -> UTF-8 .srt ---
 app.get("/srt", async (req, res) => {
   try {
     const zipUrl = req.query.zip;
     const charset = (req.query.charset || "cp1250").toLowerCase();
+    const name = (req.query.name || "subtitles.srt").replace(/[^\w.\-()\[\] ]+/g, "_");
     if (!zipUrl) return res.status(400).send("Missing zip");
 
-    const r = await fetch(zipUrl);
+    const r = await fetch(zipUrl, { timeout: 20000 });
+    if (!r.ok) throw new Error(`fetch ${r.status}`);
     const buf = Buffer.from(await r.arrayBuffer());
-    let srt;
 
-    if (zipUrl.endsWith(".zip")) {
+    let srt;
+    if (/\.zip(\?.*)?$/i.test(zipUrl)) {
       const dir = await unzipper.Open.buffer(buf);
       const entry = dir.files.find(f => /\.(srt|ass|sub)$/i.test(f.path));
       if (!entry) throw new Error("No subtitle in ZIP");
@@ -43,25 +59,23 @@ app.get("/srt", async (req, res) => {
     }
 
     res.setHeader("Content-Type", "application/x-subrip; charset=utf-8");
-    res.send(srt);
+    res.setHeader("Content-Disposition", `inline; filename="${name}"`);
+    res.status(200).send(srt);
   } catch (e) {
-    console.error("Subtitle processing error:", e);
-    res.status(500).send("Subtitle error");
+    console.error("Subtitle error:", e);
+    res.status(500).send("Subtitle processing error");
   }
 });
 
-// ----- SKUPNI HANDLER ZA SUBTITLES -----
+// --- skupni handler ---
 async function handleSubs(req, res) {
   try {
-    const type = req.params.type;
-    const id   = req.params.id;
-    const extra = req.params.extra; // lahko je undefined
-
+    const { type, id, extra } = req.params;
     const extraPart = extra ? `/${encodeURIComponent(extra)}` : "";
     const upstream = `${ORIGINAL}/subtitles/${encodeURIComponent(type)}/${encodeURIComponent(id)}${extraPart}.json`;
 
-    const r = await fetch(upstream);
-    if (!r.ok) throw new Error(`Upstream ${r.status}`);
+    const r = await fetch(upstream, { timeout: 20000 });
+    if (!r.ok) throw new Error(`upstream ${r.status}`);
     const data = await r.json();
 
     const base = `${req.protocol}://${req.get("host")}`;
@@ -72,20 +86,19 @@ async function handleSubs(req, res) {
       return {
         ...s,
         url: `${base}/srt?zip=${encodeURIComponent(orig)}&charset=cp1250&name=${name}`,
-        format: "srt",
+        format: "srt"
       };
     });
 
     res.json({ subtitles: subs });
   } catch (e) {
-    console.error("Subtitle handler error:", e);
+    console.error("Subtitles handler error:", e);
     res.json({ subtitles: [] });
   }
 }
 
-// DVE LOČENI POTI
+// dve poti (brez/z :extra)
 app.get("/subtitles/:type/:id.json", handleSubs);
 app.get("/subtitles/:type/:id/:extra.json", handleSubs);
 
-// ----- ZAŽENI STREŽNIK -----
 app.listen(PORT, () => console.log("Wrapper running on port", PORT));
