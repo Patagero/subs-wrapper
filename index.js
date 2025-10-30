@@ -1,4 +1,4 @@
-// index.js — Subs UTF-8 Wrapper (Render + robust Podnapisi fallback z COOKIE podporo + regex routes)
+// index.js — Subs UTF-8 Wrapper (diag: pokaži detailLinks, ZIP kandidat, cookie; +fixi)
 import express from "express";
 import fetch from "node-fetch";
 import unzipper from "unzipper";
@@ -9,7 +9,7 @@ const app = express();
 const PORT = process.env.PORT || 7000;
 const ORIGINAL = "https://2ecbbd610840-podnapisi.baby-beamup.club";
 
-// ---- CORS ----
+// CORS
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -18,38 +18,35 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---- Health / Manifest ----
+// Health / Manifest
 app.get("/", (_req, res) => res.send("OK - subs-wrapper"));
 app.get("/manifest.json", (_req, res) => {
   res.json({
     id: "subs-wrapper",
-    version: "1.6.0",
+    version: "1.6.1",
     name: "Podnapisi UTF-8 Wrapper",
-    description:
-      "ZIP/CP1250 → UTF-8 .srt (ExoPlayer) + robust fallback (SL/EN) z ‘cookie-aware’ prenosom",
+    description: "ZIP/CP1250 → UTF-8 .srt (ExoPlayer) + robust fallback (SL/EN) + DIAG",
     resources: ["subtitles"],
     types: ["movie", "series"],
     idPrefixes: ["tt", "tmdb"],
-    catalogs: [],
-    behaviorHints: { configurable: false, configurationRequired: false },
+    catalogs: []
   });
 });
 
-// ---- ZIP/.SRT → UTF-8 .srt (z možnostjo Cookie headerja) ----
+// /srt z možnim Cookie + Referer
 app.get("/srt", async (req, res) => {
   try {
-    const zipUrl = req.query.zip;
-    const charset = (req.query.charset || "cp1250").toLowerCase();
-    const cookie = req.query.cookie ? decodeURIComponent(String(req.query.cookie)) : "";
-    const referer = req.query.referer ? decodeURIComponent(String(req.query.referer)) : "https://www.podnapisi.net/";
-    const name = (req.query.name || "subtitles.srt").replace(/[^\w.\-()\[\] ]+/g, "_");
-
+    const zipUrl = String(req.query.zip || "");
+    const charset = String(req.query.charset || "cp1250").toLowerCase();
+    const cookie  = req.query.cookie ? String(req.query.cookie) : "";
+    const referer = req.query.referer ? String(req.query.referer) : "https://www.podnapisi.net/";
+    const name = (String(req.query.name || "subtitles.srt")).replace(/[^\w.\-()\[\] ]+/g, "_");
     if (!zipUrl) return res.status(400).send("Missing zip");
 
     const headers = {
       "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      accept: "*/*",
-      referer,
+      "accept": "*/*",
+      "referer": referer
     };
     if (cookie) headers["cookie"] = cookie;
 
@@ -60,7 +57,7 @@ app.get("/srt", async (req, res) => {
     let srt;
     if (/\.zip(\?.*)?$/i.test(zipUrl)) {
       const dir = await unzipper.Open.buffer(buf);
-      const entry = dir.files.find((f) => /\.(srt|ass|sub)$/i.test(f.path));
+      const entry = dir.files.find(f => /\.(srt|ass|sub)$/i.test(f.path));
       if (!entry) throw new Error("No subtitle in ZIP");
       const raw = await entry.buffer();
       srt = Buffer.from(iconv.decode(raw, charset), "utf8");
@@ -72,240 +69,204 @@ app.get("/srt", async (req, res) => {
     res.setHeader("Content-Disposition", `inline; filename="${name}"`);
     res.status(200).send(srt);
   } catch (e) {
-    console.error("Subtitle error:", e?.message || e);
+    console.error("SRT error:", e?.message || e);
     res.status(500).send("Subtitle processing error");
   }
 });
 
-// ---- Helperji: Cinemeta + Podnapisi ----
-function normTitle(t) {
-  return (t || "").replace(/[:/|]+/g, " ").replace(/\s+/g, " ").trim();
-}
-
-async function fetchCinemeta(type, id) {
-  try {
+// Helpers
+function normTitle(t){ return (t||"").replace(/[:/|]+/g," ").replace(/\s+/g," ").trim(); }
+async function fetchCinemeta(type,id){
+  try{
     const url = `https://v3-cinemeta.strem.io/meta/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`;
-    const r = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" } });
-    if (!r.ok) return null;
+    const r = await fetch(url, { headers: { "user-agent":"Mozilla/5.0" }});
+    if(!r.ok) return null;
     const j = await r.json();
     return j?.meta || null;
-  } catch {
-    return null;
-  }
+  }catch{ return null; }
 }
-
-function buildQueriesFromMeta(meta) {
+function buildQueriesFromMeta(meta){
   const out = new Set();
-  if (!meta) return [...out];
+  if(!meta) return [...out];
   const title = normTitle(meta.name);
-  const year = meta.year ? String(meta.year) : "";
-  if (title) {
-    out.add(title);
-    if (year) out.add(`${title} ${year}`);
-  }
+  const year  = meta.year ? String(meta.year) : "";
+  if(title){ out.add(title); if(year) out.add(`${title} ${year}`); }
   const alts = []
-    .concat(meta?.aka || [])
-    .concat(meta?.alternateName || [])
-    .concat(meta?.alternateTitles || [])
-    .map(normTitle)
-    .filter(Boolean);
-  for (const a of alts) {
-    out.add(a);
-    if (year) out.add(`${a} ${year}`);
-  }
+    .concat(meta?.aka||[])
+    .concat(meta?.alternateName||[])
+    .concat(meta?.alternateTitles||[])
+    .map(normTitle).filter(Boolean);
+  for(const a of alts){ out.add(a); if(year) out.add(`${a} ${year}`); }
   return [...out];
 }
-
-async function searchPodnapisiOnce(query, lang = "sl") {
-  const q = encodeURIComponent(query);
-  const url = `https://www.podnapisi.net/subtitles/search/?keywords=${q}&language=${lang}`;
+async function searchPodnapisiOnce(query, lang="sl"){
+  const url = `https://www.podnapisi.net/subtitles/search/?keywords=${encodeURIComponent(query)}&language=${lang}`;
   const r = await fetch(url, {
-    redirect: "follow",
-    headers: {
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "accept-language": "sl,en;q=0.9",
-    },
+    redirect:"follow",
+    headers:{
+      "user-agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      "accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "accept-language":"sl,en;q=0.9"
+    }
   });
-  if (!r.ok) return [];
+  if(!r.ok) return [];
   const html = await r.text();
   const $ = cheerio.load(html);
   const links = new Set();
-  $("a[href^='/subtitles/']").each((_, a) => {
-    const href = $(a).attr("href") || "";
-    if (/^\/subtitles\/\d+\//.test(href)) links.add("https://www.podnapisi.net" + href);
+  $("a[href^='/subtitles/']").each((_,a)=>{
+    const href = $(a).attr("href")||"";
+    if(/^\/subtitles\/\d+\//.test(href)) links.add("https://www.podnapisi.net"+href);
   });
-  $("a[href*='/download']").each((_, a) => {
-    const href = $(a).attr("href") || "";
-    if (href) {
-      if (href.startsWith("http")) links.add(href);
-      else if (href.startsWith("/")) links.add("https://www.podnapisi.net" + href);
-    }
+  $("a[href*='/download']").each((_,a)=>{
+    const href = $(a).attr("href")||"";
+    if(!href) return;
+    if(href.startsWith("http")) links.add(href);
+    else if(href.startsWith("/")) links.add("https://www.podnapisi.net"+href);
   });
   return [...links];
 }
-
-function directDownloadCandidates(detailUrl) {
+function directDownloadCandidates(detailUrl){
   const m = detailUrl.match(/\/subtitles\/(\d+)\b/);
-  if (!m) return [];
+  if(!m) return [];
   const id = m[1];
   return [
     `https://www.podnapisi.net/subtitles/${id}/download?container=zip`,
-    `https://www.podnapisi.net/subtitles/${id}/download`,
+    `https://www.podnapisi.net/subtitles/${id}/download`
   ];
 }
-
-// vrne { zipUrl, cookie, referer }
-async function readDetailAndGetZip(detailUrl) {
-  // 1) preberi detail stran in pobere “set-cookie”
+function cookieFromSetCookie(sc){
+  if(!sc) return "";
+  // primitivni jar: vzemi prve cookie pare pred ;, loči z "; "
+  return sc.split(",").map(s=>s.split(";")[0].trim()).filter(Boolean).join("; ");
+}
+async function readDetailAndGetZip(detailUrl){
+  // preberi detail in poberi cookie
   const resp = await fetch(detailUrl, {
-    redirect: "follow",
-    headers: {
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      referer: "https://www.podnapisi.net/",
-    },
+    redirect:"follow",
+    headers:{
+      "user-agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      "accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "referer":"https://www.podnapisi.net/"
+    }
   });
-
-  if (!resp.ok) return null;
-  const setCookie = resp.headers.get("set-cookie") || "";
-  const cookie = setCookie ? setCookie.split(",").map(s => s.split(";")[0]).join("; ") : ""; // osnovna jar
+  if(!resp.ok) return { zipUrl:null, cookie:"", referer:detailUrl, detailUrl };
+  const setCookie = resp.headers.get("set-cookie")||"";
+  const cookie = cookieFromSetCookie(setCookie);
   const referer = detailUrl;
 
   const html = await resp.text();
   const $ = cheerio.load(html);
-  // A) neposreden link
   let href = $("a[href*='.zip'], a[href*='/download']").first().attr("href");
-  if (href) {
-    const full = href.startsWith("http") ? href : "https://www.podnapisi.net" + href;
-    return { zipUrl: full, cookie, referer };
+  if(href){
+    const full = href.startsWith("http") ? href : "https://www.podnapisi.net"+href;
+    return { zipUrl:full, cookie, referer, detailUrl };
   }
-
-  // B) če ni, poskusi iz ID-ja sestaviti /download
-  const candidates = directDownloadCandidates(detailUrl);
-  for (const u of candidates) {
-    // quick HEAD/GET z isto sejo
-    const test = await fetch(u, {
-      method: "HEAD",
-      redirect: "manual",
-      headers: {
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        cookie,
-        referer,
-        accept: "*/*",
-      },
-    }).catch(() => null);
-    if (test && (test.status === 200 || test.status === 302 || test.status === 301)) {
-      return { zipUrl: u, cookie, referer };
-    }
+  // poskusi direktne /download kandidate
+  for(const u of directDownloadCandidates(detailUrl)){
+    try{
+      const head = await fetch(u,{ method:"HEAD", redirect:"manual", headers:{
+        "user-agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "accept":"*/*","cookie":cookie,"referer":referer
+      }});
+      if([200,301,302].includes(head.status)) return { zipUrl:u, cookie, referer, detailUrl };
+    }catch{}
   }
-
-  return null;
+  return { zipUrl:null, cookie, referer, detailUrl };
 }
 
-// ---- DEBUG ----
-app.get("/debug/*", (req, res) => {
-  res.json({ method: req.method, path: req.path, params: req.params, query: req.query });
+// DIAG endpoint: ročno preveri naslov
+app.get("/fallback-test", async (req,res)=>{
+  const q = String(req.query.q||"");
+  const lang = String(req.query.lang||"sl");
+  const detailLinks = await searchPodnapisiOnce(q, lang);
+  const diag = [];
+  for(const d of detailLinks.slice(0,3)){
+    const z = await readDetailAndGetZip(d);
+    diag.push({ detail:d, zip:z.zipUrl, cookie: z.cookie ? "(captured)" : "", referer:z.referer });
+  }
+  res.json({ query:q, lang, detailLinks, diag });
 });
 
-// ---- Handler (NE enkodiramo :extra) ----
-async function handleSubs(req, res) {
-  try {
-    const type = req.params.type;
-    const id = req.params.id;
+// Glavni handler (NE enkodiramo :extra)
+async function handleSubs(req,res){
+  try{
+    const type  = req.params.type;
+    const id    = req.params.id;
     const extra = req.params.extra;
     const extraPart = extra ? `/${extra}` : "";
     const upstream = `${ORIGINAL}/subtitles/${encodeURIComponent(type)}/${encodeURIComponent(id)}${extraPart}.json`;
 
     let items = [];
-
     // 1) Dexter upstream
-    try {
-      const r = await fetch(upstream, { headers: { "user-agent": "Mozilla/5.0 (SubsWrapper)" } });
-      if (r.ok) {
+    try{
+      const r = await fetch(upstream,{ headers:{ "user-agent":"Mozilla/5.0 (SubsWrapper)" }});
+      if(r.ok){
         const data = await r.json();
-        if (Array.isArray(data?.subtitles)) items = data.subtitles;
+        if(Array.isArray(data?.subtitles)) items = data.subtitles;
       } else {
         console.warn("Upstream status:", r.status);
       }
-    } catch (e) {
-      console.warn("Upstream error:", e?.message || e);
-    }
+    }catch(e){ console.warn("Upstream error:", e?.message||e); }
 
-    // 2) Fallback na Podnapisi — najprej SL, potem EN, z zajemom cookie
-    if (!items.length) {
-      const meta = await fetchCinemeta(type, id);
+    // 2) Fallback SL→EN
+    if(!items.length){
+      const meta = await fetchCinemeta(type,id);
       const queries = buildQueriesFromMeta(meta);
-
-      outer: for (const lang of ["sl", "en"]) {
-        for (const q of queries) {
+      let found = null, usedLang = "sl";
+      outer: for(const lang of ["sl","en"]){
+        for(const q of queries){
           console.log(`[FALLBACK ${lang}] search:`, q);
           const detailLinks = await searchPodnapisiOnce(q, lang);
           console.log(`[FALLBACK ${lang}] detail links:`, detailLinks.length);
-
-          for (const d of detailLinks) {
+          for(const d of detailLinks){
             const z = await readDetailAndGetZip(d);
-            if (z?.zipUrl) {
-              items.push({
-                id: lang,
-                lang: lang === "sl" ? "Slovenian" : "English",
-                url: z.zipUrl,
-                title: `Podnapisi.net (${lang.toUpperCase()}): ${q}`,
-                _cookie: z.cookie || "",
-                _referer: z.referer || "https://www.podnapisi.net/",
-              });
-              break outer; // prvi delujoč ZIP je dovolj
-            }
+            if(z.zipUrl){ found = { q, z, lang }; break outer; }
           }
         }
       }
+      if(found){
+        items.push({
+          id: found.lang,
+          lang: found.lang === "sl" ? "Slovenian" : "English",
+          url: found.z.zipUrl,
+          title: `Podnapisi.net (${found.lang.toUpperCase()}): ${found.q}`,
+          _cookie: found.z.cookie || "",
+          _referer: found.z.referer || "https://www.podnapisi.net/"
+        });
+      }
     }
 
-    // 3) Normalizacija → /srt (dodamo cookie in referer, če ju imamo)
+    // 3) Normalizacija → /srt
     const base = `${req.protocol}://${req.get("host")}`;
-    const subs = (items || [])
-      .map((s, i) => {
-        const orig = s.url || s.src || s.link || s.download || s.zip || s.href || s.file;
-        if (!orig) return null;
-        const lang = s.lang || s.language || "Slovenian";
-        const name = encodeURIComponent((s.title || lang || `subs_${i}`) + ".srt");
-
-        const params = new URLSearchParams({
-          zip: orig,
-          charset: "cp1250",
-          name,
-        });
-        if (s._cookie) params.set("cookie", encodeURIComponent(s._cookie));
-        if (s._referer) params.set("referer", encodeURIComponent(s._referer));
-
-        return {
-          ...s,
-          id: s.id || `${lang}_${i}`,
-          lang,
-          url: `${base}/srt?${params.toString()}`,
-          format: "srt",
-        };
-      })
-      .filter(Boolean);
+    const subs = (items||[]).map((s,i)=>{
+      const orig = s.url || s.src || s.link || s.download || s.zip || s.href || s.file;
+      if(!orig) return null;
+      const lang = s.lang || s.language || "Slovenian";
+      const name = encodeURIComponent((s.title || lang || `subs_${i}`) + ".srt");
+      const params = new URLSearchParams();
+      params.set("zip", orig);
+      params.set("charset","cp1250");
+      params.set("name", name);
+      if(s._cookie) params.set("cookie", s._cookie); // ne dvakrat enkodirati
+      if(s._referer) params.set("referer", s._referer);
+      return {
+        ...s,
+        id: s.id || `${lang}_${i}`,
+        lang,
+        url: `${base}/srt?${params.toString()}`,
+        format: "srt"
+      };
+    }).filter(Boolean);
 
     res.json({ subtitles: subs });
-  } catch (e) {
-    console.error("Handler error:", e?.message || e);
+  }catch(e){
+    console.error("Handler error:", e?.message||e);
     res.json({ subtitles: [] });
   }
 }
 
-// ---- Regex rute (Express 5) ----
-app.get(/^\/subtitles\/([^/]+)\/([^/]+)\.json$/, (req, res) => {
-  req.params.type = req.params[0];
-  req.params.id = req.params[1];
-  handleSubs(req, res);
-});
-app.get(/^\/subtitles\/([^/]+)\/([^/]+)\/([^/]+)\.json$/, (req, res) => {
-  req.params.type = req.params[0];
-  req.params.id = req.params[1];
-  req.params.extra = req.params[2];
-  handleSubs(req, res);
-});
+// Regex rute (Express 5)
+app.get(/^\/subtitles\/([^/]+)\/([^/]+)\.json$/, (req,res)=>{ req.params.type=req.params[0]; req.params.id=req.params[1]; handleSubs(req,res); });
+app.get(/^\/subtitles\/([^/]+)\/([^/]+)\/([^/]+)\.json$/, (req,res)=>{ req.params.type=req.params[0]; req.params.id=req.params[1]; req.params.extra=req.params[2]; handleSubs(req,res); });
 
-app.listen(PORT, () => console.log("Wrapper running on port", PORT));
+app.listen(PORT, ()=>console.log("Wrapper running on port", PORT));
