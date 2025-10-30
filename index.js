@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 7000;
 const ORIGINAL = "https://2ecbbd610840-podnapisi.baby-beamup.club";
 
-// --- CORS: dovoli vse ---
+// --- CORS ---
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -16,26 +16,27 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- Health / root (za hitri test & Render health check) ---
+// Health
 app.get("/", (req, res) => res.send("OK - subs-wrapper"));
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// --- Manifest ---
+// Manifest (razširimo idPrefixes)
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "subs-wrapper",
-    version: "1.0.0",
+    version: "1.0.1",
     name: "Podnapisi UTF-8 Wrapper",
-    description: "Pretvori ZIP/CP1250 → UTF-8 SRT (za ExoPlayer)",
+    description: "ZIP/CP1250 → UTF-8 SRT (za ExoPlayer)",
     resources: ["subtitles"],
     types: ["movie", "series"],
-    idPrefixes: ["tt"],
+    // sprejmi IMDb in TMDb ID-je
+    idPrefixes: ["tt", "tmdb"],
     catalogs: [],
     behaviorHints: { configurable: false, configurationRequired: false }
   });
 });
 
-// --- /srt: ZIP/.srt -> UTF-8 .srt ---
+// /srt: ZIP/.srt -> UTF-8 .srt
 app.get("/srt", async (req, res) => {
   try {
     const zipUrl = req.query.zip;
@@ -43,7 +44,10 @@ app.get("/srt", async (req, res) => {
     const name = (req.query.name || "subtitles.srt").replace(/[^\w.\-()\[\] ]+/g, "_");
     if (!zipUrl) return res.status(400).send("Missing zip");
 
-    const r = await fetch(zipUrl, { timeout: 20000 });
+    const r = await fetch(zipUrl, {
+      timeout: 25000,
+      headers: { "user-agent": "Mozilla/5.0 (SubsWrapper)" }
+    });
     if (!r.ok) throw new Error(`fetch ${r.status}`);
     const buf = Buffer.from(await r.arrayBuffer());
 
@@ -62,29 +66,45 @@ app.get("/srt", async (req, res) => {
     res.setHeader("Content-Disposition", `inline; filename="${name}"`);
     res.status(200).send(srt);
   } catch (e) {
-    console.error("Subtitle error:", e);
+    console.error("Subtitle error:", e?.message || e);
     res.status(500).send("Subtitle processing error");
   }
 });
 
-// --- skupni handler ---
+// skupni handler z več fallbacki in logi
 async function handleSubs(req, res) {
   try {
     const { type, id, extra } = req.params;
     const extraPart = extra ? `/${encodeURIComponent(extra)}` : "";
     const upstream = `${ORIGINAL}/subtitles/${encodeURIComponent(type)}/${encodeURIComponent(id)}${extraPart}.json`;
 
-    const r = await fetch(upstream, { timeout: 20000 });
+    console.log("[UPSTREAM]", upstream);
+    const r = await fetch(upstream, {
+      timeout: 25000,
+      headers: { "user-agent": "Mozilla/5.0 (SubsWrapper)" }
+    });
     if (!r.ok) throw new Error(`upstream ${r.status}`);
     const data = await r.json();
 
+    // če slučajno pride drug format, normaliziraj
+    const items = Array.isArray(data?.subtitles) ? data.subtitles : [];
+    console.log("[UPSTREAM] items:", items.length);
+
     const base = `${req.protocol}://${req.get("host")}`;
-    const subs = (data.subtitles || []).map((s, i) => {
-      const orig = s.url || s.src || s.link;
+    const subs = items.map((s, i) => {
+      // poskusi več možnih polj z url-jem
+      const orig =
+        s.url || s.src || s.link || s.download || s.zip || s.href || s.file;
+
+      const lang = s.lang || s.language || "Slovenian";
+      const idSafe = s.id || `${lang}_${i}`;
       if (!orig) return s;
-      const name = encodeURIComponent((s.title || s.lang || `subs_${i}`) + ".srt");
+
+      const name = encodeURIComponent((s.title || lang || `subs_${i}`) + ".srt");
       return {
         ...s,
+        id: idSafe,
+        lang,
         url: `${base}/srt?zip=${encodeURIComponent(orig)}&charset=cp1250&name=${name}`,
         format: "srt"
       };
@@ -92,7 +112,7 @@ async function handleSubs(req, res) {
 
     res.json({ subtitles: subs });
   } catch (e) {
-    console.error("Subtitles handler error:", e);
+    console.error("Subtitles handler error:", e?.message || e);
     res.json({ subtitles: [] });
   }
 }
@@ -102,3 +122,4 @@ app.get("/subtitles/:type/:id.json", handleSubs);
 app.get("/subtitles/:type/:id/:extra.json", handleSubs);
 
 app.listen(PORT, () => console.log("Wrapper running on port", PORT));
+
