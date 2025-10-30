@@ -1,4 +1,4 @@
-// index.js — Podnapisi UTF-8 Wrapper (Render + CORS + fallback + extra fix)
+// index.js — Podnapisi UTF-8 Wrapper (Render + CORS + fallback + regex routes + extra fix)
 import express from "express";
 import fetch from "node-fetch";
 import unzipper from "unzipper";
@@ -28,7 +28,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/manifest.json", (_req, res) => {
   res.json({
     id: "subs-wrapper",
-    version: "1.2.0",
+    version: "1.2.1",
     name: "Podnapisi UTF-8 Wrapper",
     description: "ZIP/CP1250 → UTF-8 .srt (ExoPlayer) + fallback iskanje",
     resources: ["subtitles"],
@@ -49,7 +49,7 @@ app.get("/srt", async (req, res) => {
     if (!zipUrl) return res.status(400).send("Missing zip");
 
     const r = await fetch(zipUrl, {
-      timeout: 25000,
+      // node-fetch v3 nima nativnega timeouta, a Render običajno prekine po ~2 min
       headers: { "user-agent": "Mozilla/5.0 (SubsWrapper)" }
     });
     if (!r.ok) throw new Error(`fetch ${r.status}`);
@@ -79,7 +79,7 @@ app.get("/srt", async (req, res) => {
 async function fetchCinemetaTitle(type, id) {
   try {
     const url = `https://v3-cinemeta.strem.io/meta/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`;
-    const r = await fetch(url, { timeout: 15000, headers: { "user-agent": "Mozilla/5.0" } });
+    const r = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" } });
     if (!r.ok) return null;
     const j = await r.json();
     const name = j?.meta?.name;
@@ -92,7 +92,7 @@ async function searchPodnapisi(title, lang = "sl") {
   try {
     const q = encodeURIComponent(title);
     const url = `https://www.podnapisi.net/subtitles/search/?keywords=${q}&language=${lang}`;
-    const r = await fetch(url, { timeout: 20000, headers: { "user-agent": "Mozilla/5.0" } });
+    const r = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" } });
     if (!r.ok) return [];
     const html = await r.text();
     const $ = cheerio.load(html);
@@ -107,7 +107,7 @@ async function searchPodnapisi(title, lang = "sl") {
 
 async function getZipFromDetail(detailUrl) {
   try {
-    const r = await fetch(detailUrl, { timeout: 20000, headers: { "user-agent": "Mozilla/5.0" } });
+    const r = await fetch(detailUrl, { headers: { "user-agent": "Mozilla/5.0" } });
     if (!r.ok) return null;
     const html = await r.text();
     const $ = cheerio.load(html);
@@ -134,18 +134,15 @@ async function handleSubs(req, res) {
   try {
     const type  = req.params.type;        // 'movie' | 'series'
     const id    = req.params.id;          // 'tt1375666' ali 'tmdb:12345'
-    const extra = req.params.extra;       // npr. '1:1' (sezona:epizoda) — NE ENKODIRAJ!
+    const extra = req.params.extra;       // npr. '1:1' — pusti dvopičje
 
-    const extraPart = extra ? `/${extra}` : ""; // pustimo dvopičje
+    const extraPart = extra ? `/${extra}` : ""; // BREZ encodeURIComponent na extra
     const upstream = `${ORIGINAL}/subtitles/${encodeURIComponent(type)}/${encodeURIComponent(id)}${extraPart}.json`;
 
     // 1) originalni Dexterjev addon
     let items = [];
     try {
-      const r = await fetch(upstream, {
-        timeout: 25000,
-        headers: { "user-agent": "Mozilla/5.0 (SubsWrapper)" }
-      });
+      const r = await fetch(upstream, { headers: { "user-agent": "Mozilla/5.0 (SubsWrapper)" } });
       if (r.ok) {
         const data = await r.json();
         if (Array.isArray(data?.subtitles)) items = data.subtitles;
@@ -202,9 +199,21 @@ async function handleSubs(req, res) {
   }
 }
 
-// Dve ruti (brez/z :extra)
-app.get("/subtitles/:type/:id.json", handleSubs);
-app.get("/subtitles/:type/:id/:extra.json", handleSubs);
+// ---------- POPRAVLJENE RUTE (Regex, združljivo z Express 5) ----------
+// brez :extra  (npr. /subtitles/movie/tt1375666.json)
+app.get(/^\/subtitles\/([^/]+)\/([^/]+)\.json$/, (req, res) => {
+  req.params.type = req.params[0];
+  req.params.id   = req.params[1];
+  handleSubs(req, res);
+});
+
+// z :extra (npr. /subtitles/series/tt0944947/1:1.json ali /subtitles/series/tmdb:123/1:1.json)
+app.get(/^\/subtitles\/([^/]+)\/([^/]+)\/([^/]+)\.json$/, (req, res) => {
+  req.params.type  = req.params[0];
+  req.params.id    = req.params[1];
+  req.params.extra = req.params[2];
+  handleSubs(req, res);
+});
 
 // ---------- Start ----------
 app.listen(PORT, () => console.log("Wrapper running on port", PORT));
