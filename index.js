@@ -1,4 +1,4 @@
-// index.js — Podnapisi UTF-8 Wrapper (Render + robust fallback za podnapisi.net + regex routes)
+// index.js — Subs UTF-8 Wrapper (Render + robust Podnapisi download + SL/EN fallback + regex routes)
 import express from "express";
 import fetch from "node-fetch";
 import unzipper from "unzipper";
@@ -7,11 +7,9 @@ import * as cheerio from "cheerio";
 
 const app = express();
 const PORT = process.env.PORT || 7000;
-
-// ORIGINAL Dexterjev podnapisi addon (pusti ali zamenjaj po potrebi)
 const ORIGINAL = "https://2ecbbd610840-podnapisi.baby-beamup.club";
 
-// ---------- CORS ----------
+// ---- CORS ----
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -20,17 +18,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------- Health / Root ----------
+// ---- Health / Manifest ----
 app.get("/", (_req, res) => res.send("OK - subs-wrapper"));
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// ---------- Manifest ----------
 app.get("/manifest.json", (_req, res) => {
   res.json({
     id: "subs-wrapper",
-    version: "1.4.0",
+    version: "1.5.0",
     name: "Podnapisi UTF-8 Wrapper",
-    description: "ZIP/CP1250 → UTF-8 .srt (ExoPlayer) + robustno fallback iskanje na podnapisi.net",
+    description: "ZIP/CP1250 → UTF-8 .srt (ExoPlayer) + robust fallback (SL/EN)",
     resources: ["subtitles"],
     types: ["movie", "series"],
     idPrefixes: ["tt", "tmdb"],
@@ -39,7 +34,7 @@ app.get("/manifest.json", (_req, res) => {
   });
 });
 
-// ---------- Pretvorba ZIP/.SRT ----------
+// ---- ZIP/.SRT → UTF-8 .srt ----
 app.get("/srt", async (req, res) => {
   try {
     const zipUrl = req.query.zip;
@@ -48,9 +43,11 @@ app.get("/srt", async (req, res) => {
     if (!zipUrl) return res.status(400).send("Missing zip");
 
     const r = await fetch(zipUrl, {
+      redirect: "follow",
       headers: {
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "accept": "*/*",
+        "referer": "https://www.podnapisi.net/"
       }
     });
     if (!r.ok) throw new Error(`fetch ${r.status}`);
@@ -76,14 +73,10 @@ app.get("/srt", async (req, res) => {
   }
 });
 
-// ---------- Helperji: Cinemeta + Podnapisi ----------
+// ---- helpers: Cinemeta + Podnapisi ----
 function normTitle(t) {
-  return (t || "")
-    .replace(/[:/|]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return (t || "").replace(/[:/|]+/g, " ").replace(/\s+/g, " ").trim();
 }
-
 async function fetchCinemeta(type, id) {
   try {
     const url = `https://v3-cinemeta.strem.io/meta/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`;
@@ -93,7 +86,6 @@ async function fetchCinemeta(type, id) {
     return j?.meta || null;
   } catch { return null; }
 }
-
 function buildQueriesFromMeta(meta) {
   const out = new Set();
   if (!meta) return [...out];
@@ -103,7 +95,6 @@ function buildQueriesFromMeta(meta) {
     out.add(title);
     if (year) out.add(`${title} ${year}`);
   }
-  // alternative titles (če so)
   const alts = []
     .concat(meta?.aka || [])
     .concat(meta?.alternateName || [])
@@ -116,11 +107,11 @@ function buildQueriesFromMeta(meta) {
   }
   return [...out];
 }
-
 async function searchPodnapisiOnce(query, lang = "sl") {
   const q = encodeURIComponent(query);
   const url = `https://www.podnapisi.net/subtitles/search/?keywords=${q}&language=${lang}`;
   const r = await fetch(url, {
+    redirect: "follow",
     headers: {
       "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
       "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -130,92 +121,96 @@ async function searchPodnapisiOnce(query, lang = "sl") {
   if (!r.ok) return [];
   const html = await r.text();
   const $ = cheerio.load(html);
-
-  // pobiramo povezave do strani s posameznimi prevodi
   const links = new Set();
-
-  // varianta A: tipične povezave
   $("a[href^='/subtitles/']").each((_, a) => {
     const href = $(a).attr("href") || "";
     if (/^\/subtitles\/\d+\//.test(href)) links.add("https://www.podnapisi.net" + href);
   });
-
-  // varianta B: gumbi “Download” z data-atributi
   $("a[href*='/download']").each((_, a) => {
     const href = $(a).attr("href") || "";
+    if (!href) return;
     if (href.startsWith("http")) links.add(href);
     else if (href.startsWith("/")) links.add("https://www.podnapisi.net" + href);
   });
-
   return [...links];
 }
 
-async function firstZipFromDetail(detailUrl) {
-  const r = await fetch(detailUrl, {
-    headers: {
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "referer": "https://www.podnapisi.net/"
-    }
-  });
-  if (!r.ok) return null;
-  const html = await r.text();
-  const $ = cheerio.load(html);
-
-  // najdi .zip ali /download link
-  const cand = $("a[href*='.zip'], a[href*='/download']").first();
-  const href = cand.attr("href");
-  if (!href) return null;
-  return href.startsWith("http") ? href : "https://www.podnapisi.net" + href;
+function buildDirectDownload(detailUrl) {
+  // Če je detail URL oblike /subtitles/123456/nekaj → naredimo /subtitles/123456/download
+  const m = detailUrl.match(/\/subtitles\/(\d+)\b/);
+  if (!m) return null;
+  const id = m[1];
+  return [
+    `https://www.podnapisi.net/subtitles/${id}/download?container=zip`,
+    `https://www.podnapisi.net/subtitles/${id}/download`
+  ];
 }
 
-async function fallbackPodnapisi(meta, preferLang = "sl") {
-  const queries = buildQueriesFromMeta(meta);
-  // Dodamo še varijante brez letnice / z letnico
-  const extraQueries = [];
-  for (const q of queries) {
-    const noYear = q.replace(/\b(19|20)\d{2}\b/, "").trim();
-    if (noYear && noYear !== q) extraQueries.push(noYear);
-  }
-  const allQ = [...new Set([...queries, ...extraQueries])];
-
-  for (const q of allQ) {
-    console.log("[FALLBACK] podnapisi.net search:", q);
-    const detailLinks = await searchPodnapisiOnce(q, preferLang);
-    console.log("[FALLBACK] detail links:", detailLinks.length);
-    for (const d of detailLinks) {
-      const zip = await firstZipFromDetail(d);
-      if (zip) {
-        return { title: q, zip };
+async function firstZip(detailUrl) {
+  // 1) Poskusi direktne /download URL-je iz ID-ja
+  const direct = buildDirectDownload(detailUrl) || [];
+  for (const d of direct) {
+    try {
+      const rd = await fetch(d, {
+        redirect: "follow",
+        headers: {
+          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          "accept": "*/*",
+          "referer": detailUrl
+        }
+      });
+      if (rd.ok) {
+        const finalUrl = rd.url; // po redirectu
+        if (/\.zip(\?.*)?$/i.test(finalUrl)) return finalUrl;
+        // včasih vrača zip vsebino brez .zip v URL-ju — vseeno vrnemo d
+        const ct = rd.headers.get("content-type") || "";
+        if (/zip|octet-stream/i.test(ct)) return d;
       }
-    }
+    } catch (_) {}
   }
+
+  // 2) Če direktni ne delajo, preberi detail HTML in najdi linke
+  try {
+    const r = await fetch(detailUrl, {
+      redirect: "follow",
+      headers: {
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "referer": "https://www.podnapisi.net/"
+      }
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const $ = cheerio.load(html);
+    // prioritetno poglej .zip in /download
+    const a = $("a[href*='.zip'], a[href*='/download']").first();
+    const href = a?.attr("href");
+    if (href) {
+      const full = href.startsWith("http") ? href : "https://www.podnapisi.net" + href;
+      if (full) return full;
+    }
+  } catch (_) {}
+
   return null;
 }
 
-// ---------- DEBUG ----------
+// ---- DEBUG ----
 app.get("/debug/*", (req, res) => {
-  res.json({
-    method: req.method,
-    path: req.path,
-    params: req.params,
-    query: req.query,
-    note: "Primer: /debug/subtitles/series/tt0944947/1:1.json"
-  });
+  res.json({ method: req.method, path: req.path, params: req.params, query: req.query });
 });
 
-// ---------- Glavni handler (brez enkodiranja :extra) ----------
+// ---- Handler (NE enkodiramo :extra) ----
 async function handleSubs(req, res) {
   try {
-    const type  = req.params.type;        // 'movie' | 'series'
-    const id    = req.params.id;          // 'tt1375666' ali 'tmdb:12345'
-    const extra = req.params.extra;       // npr. '1:1' — pusti dvopičje
-
+    const type  = req.params.type;
+    const id    = req.params.id;
+    const extra = req.params.extra;
     const extraPart = extra ? `/${extra}` : "";
     const upstream = `${ORIGINAL}/subtitles/${encodeURIComponent(type)}/${encodeURIComponent(id)}${extraPart}.json`;
 
     let items = [];
-    // 1) originalni Dexter
+
+    // 1) Dexter upstream
     try {
       const r = await fetch(upstream, { headers: { "user-agent": "Mozilla/5.0 (SubsWrapper)" } });
       if (r.ok) {
@@ -228,17 +223,31 @@ async function handleSubs(req, res) {
       console.warn("Upstream error:", e?.message || e);
     }
 
-    // 2) Fallback na podnapisi.net (robustno)
+    // 2) Fallback na Podnapisi — najprej SL, potem EN
     if (!items.length) {
       const meta = await fetchCinemeta(type, id);
-      const fb = await fallbackPodnapisi(meta, "sl");
-      if (fb?.zip) {
-        items.push({
-          id: "sl",
-          lang: "Slovenian",
-          url: fb.zip,
-          title: `Podnapisi.net: ${fb.title}`
-        });
+      const queries = buildQueriesFromMeta(meta);
+      // Najprej slovenščina, nato angleščina
+      for (const lang of ["sl", "en"]) {
+        for (const q of queries) {
+          console.log(`[FALLBACK ${lang}] search:`, q);
+          const detailLinks = await searchPodnapisiOnce(q, lang);
+          console.log(`[FALLBACK ${lang}] detail links:`, detailLinks.length);
+          for (const d of detailLinks) {
+            const zip = await firstZip(d);
+            if (zip) {
+              items.push({
+                id: lang,
+                lang: lang === "sl" ? "Slovenian" : "English",
+                url: zip,
+                title: `Podnapisi.net (${lang.toUpperCase()}): ${q}`
+              });
+              break;
+            }
+          }
+          if (items.length) break;
+        }
+        if (items.length) break;
       }
     }
 
@@ -267,15 +276,12 @@ async function handleSubs(req, res) {
   }
 }
 
-// ---------- RegEx ruti (združljivo z Express 5) ----------
-// brez :extra  (npr. /subtitles/movie/tt1375666.json)
+// ---- Regex rute (Express 5) ----
 app.get(/^\/subtitles\/([^/]+)\/([^/]+)\.json$/, (req, res) => {
   req.params.type = req.params[0];
   req.params.id   = req.params[1];
   handleSubs(req, res);
 });
-
-// z :extra (npr. /subtitles/series/tt0944947/1:1.json)
 app.get(/^\/subtitles\/([^/]+)\/([^/]+)\/([^/]+)\.json$/, (req, res) => {
   req.params.type  = req.params[0];
   req.params.id    = req.params[1];
@@ -283,5 +289,4 @@ app.get(/^\/subtitles\/([^/]+)\/([^/]+)\/([^/]+)\.json$/, (req, res) => {
   handleSubs(req, res);
 });
 
-// ---------- Start ----------
 app.listen(PORT, () => console.log("Wrapper running on port", PORT));
