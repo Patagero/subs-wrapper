@@ -6,9 +6,10 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "cheerio": "^1.1.2",
     "express": "^4.19.2",
-    "node-fetch": "^3.3.2",
     "iconv-lite": "^0.6.3",
+    "node-fetch": "^3.3.2",
     "unzipper": "^0.10.14"
   }
 }
