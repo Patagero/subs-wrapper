@@ -4,7 +4,7 @@ import unzipper from "unzipper";
 import iconv from "iconv-lite";
 
 const app = express();
-const PORT = 7000;
+const PORT = process.env.PORT || 7000;
 const ORIGINAL = "https://2ecbbd610840-podnapisi.baby-beamup.club";
 
 // ----- MANIFEST -----
